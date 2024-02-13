@@ -17,7 +17,7 @@ The IoT Environmental Monitoring System is a comprehensive solution designed to 
 1. **Clone the Repository:** Clone this repository to your local machine.
 2. **Configure `pom.xml`:** Open the `pom.xml` file and ensure that all dependencies are correctly configured. Make any necessary adjustments based on your project requirements.
 3. **Run the API:** Run the Spring Boot API on your local machine or deploy it to a server. Refer to the API documentation for instructions on running and configuring the API.
-4. **API Testing** Visit http://localhost:<your-port>/swagger-ui/#/ to test the API in real-time!
+4. **API Testing** Visit http://localhost:8080/swagger-ui/#/ to test the API in real-time!
 
 ### Configuring the ESP32 with Arduino IDE
 1. **Install Arduino IDE:** Download and install the Arduino IDE from the [official website](https://www.arduino.cc/en/software).
