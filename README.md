@@ -33,10 +33,10 @@ The IoT Environmental Monitoring System is a comprehensive solution designed to 
 - Java JDK
 
 ## Documentation
-For detailed documentation on the API endpoints and usage, refer to the [API Documentation](link-to-api-docs).
+For detailed documentation on the API endpoints and usage, refer to the [API Documentation](Documentation.pdf).
 
 ## Contributing
 Contributions are welcome! If you have any suggestions, bug reports, or feature requests, please open an issue or submit a pull request.
 
 ## License
-This project is licensed under the [MIT License](link-to-license).
+This project is licensed under the [MIT License](LICENSE).
