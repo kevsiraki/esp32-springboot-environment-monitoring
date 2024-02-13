@@ -1,0 +1,35 @@
+# Compiled class file
+*.class
+
+# Log files
+*.log
+
+# IntelliJ IDEA
+.idea/
+
+# Eclipse
+.classpath
+.project
+.settings/
+
+# Maven
+target/
+
+# Gradle
+build/
+.gradle/
+
+# Spring Boot
+*.iml
+*.ipr
+*.iws
+.idea/
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!src/main/resources/application.properties
+
+# Application-specific
+/src/main/resources/
+
+# Ignore the secrets.h file
+secrets.h
