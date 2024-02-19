@@ -25,6 +25,7 @@ import java.util.stream.Stream;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 
 import org.springframework.hateoas.CollectionModel;
 import org.springframework.hateoas.EntityModel;
@@ -35,6 +36,9 @@ import org.springframework.http.ResponseEntity;
 
 import io.swagger.annotations.ApiOperation;
 import io.swagger.annotations.ApiParam;
+
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 
 @RestController
 public class TemperatureController {
@@ -47,49 +51,91 @@ public class TemperatureController {
                 this.deviceRepository = deviceRepository;
         }
 
-        @ApiOperation("Add a new temperature")
+        @ApiOperation("Add a new temperature reading")
         @PostMapping("/temperatures")
-        Temperature newTemperature(@RequestBody Temperature temperatureRequest) {
-                // Check if device exists
-                Optional<Device> existingDevice = deviceRepository
-                                .findByDeviceName(temperatureRequest.getDevice().getDeviceName());
+        public Temperature newTemperature(@RequestBody Temperature temperatureRequest) {
+                // Check if device is provided in the request
+                if (temperatureRequest.getDevice() == null) {
+                        throw new IllegalArgumentException("Device is required in the request body");
+                }
+
+                // Get the current user's API key
+                String currentUserApiKey = getCurrentUserApiKey();
+
+                // Check if device exists for the current user's API key
+                Optional<Device> existingDevice = deviceRepository.findByDeviceNameAndApiKey(
+                                temperatureRequest.getDevice().getDeviceName(), currentUserApiKey);
 
                 Device device;
                 if (existingDevice.isPresent()) {
                         device = existingDevice.get();
-                        // Check if the location is different
-                        if (!device.getLocation().equals(temperatureRequest.getDevice().getLocation())) {
-                                // Update the location
-                                device.setLocation(temperatureRequest.getDevice().getLocation());
-                                // Save the updated device
-                                device = deviceRepository.save(device);
-                        }
                 } else {
-                        // If not, create a new device
-                        device = deviceRepository.save(temperatureRequest.getDevice());
+                        // Check if the device name exists for any API key
+                        Optional<Device> deviceWithSameName = deviceRepository
+                                        .findByDeviceName(temperatureRequest.getDevice().getDeviceName());
+                        if (deviceWithSameName.isPresent()) {
+                                // Append a unique suffix to the device name
+                                String uniqueDeviceName = appendUniqueSuffix(
+                                                temperatureRequest.getDevice().getDeviceName());
+                                // Create a new device associated with the current user's API key and unique
+                                // device name
+                                device = new Device(uniqueDeviceName, temperatureRequest.getDevice().getLocation(),
+                                                currentUserApiKey);
+                        } else {
+                                // Create a new device associated with the current user's API key
+                                device = new Device(temperatureRequest.getDevice().getDeviceName(),
+                                                temperatureRequest.getDevice().getLocation(), currentUserApiKey);
+                        }
                 }
 
-                // Create a new Temperature object with the provided data and device
+                // Save the device to the database
+                deviceRepository.save(device);
+
+                // Associate the device with the temperature
+                temperatureRequest.setDevice(device);
+
+                // Create a new Temperature object with the provided data
                 Temperature newTemperature = new Temperature(temperatureRequest.getTemperatureC(),
                                 temperatureRequest.getHumidityPercent(), System.currentTimeMillis(), device);
+
+                // Calculate and set the dew point
+                newTemperature.calculateAndSetDewPoint();
 
                 // Save the temperature
                 return temperatureRepository.save(newTemperature);
         }
 
+        private String getCurrentUserApiKey() {
+                // Retrieve the current authentication object
+                Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+                if (authentication != null && authentication.getPrincipal() instanceof User) {
+                        // Assuming UserDetails contains the API key information
+                        User userDetails = (User) authentication.getPrincipal();
+                        return userDetails.getApiKey();
+                } else {
+                        throw new RuntimeException("Unable to retrieve current user's API key");
+                }
+        }
+
+        public String appendUniqueSuffix(String deviceName) {
+                // Implement logic to generate a unique suffix and append it to the device name
+                // For example, you can use a random UUID suffix
+                String uniqueSuffix = UUID.randomUUID().toString().substring(0, 6);
+                return deviceName + "_" + uniqueSuffix;
+        }
+
         @ApiOperation("Get all temperatures")
         @GetMapping("/temperatures")
         CollectionModel<EntityModel<Temperature>> all() {
+                String currentUserApiKey = getCurrentUserApiKey();
+
                 List<EntityModel<Temperature>> temperatures = temperatureRepository.findAll().stream()
+                                .filter(temperature -> temperature.getDevice().getApiKey().equals(currentUserApiKey))
                                 .map(temperature -> {
                                         // Create a link to the temperature's details
                                         Link selfLink = linkTo(
                                                         methodOn(TemperatureController.class).one(temperature.getId()))
                                                         .withSelfRel();
-
-                                        // Create a link to all temperatures
-                                        Link allLink = linkTo(methodOn(TemperatureController.class).all())
-                                                        .withRel("temperatures");
 
                                         // Create a link to the device associated with this temperature
                                         Link deviceLink = linkTo(methodOn(DeviceController.class)
@@ -97,7 +143,7 @@ public class TemperatureController {
                                                         .withRel("device");
 
                                         // Create an EntityModel for the temperature including links
-                                        return EntityModel.of(temperature, selfLink, allLink, deviceLink);
+                                        return EntityModel.of(temperature, selfLink, deviceLink);
                                 })
                                 .collect(Collectors.toList());
 
@@ -108,8 +154,11 @@ public class TemperatureController {
 
         @ApiOperation("Get a temperature by ID")
         @GetMapping("/temperatures/{id}")
-        EntityModel<Temperature> one(@ApiParam("Temperature ID") @PathVariable Long id) {
+        EntityModel<Temperature> one(@ApiParam("Temperature ID") @PathVariable String id) {
+                String currentUserApiKey = getCurrentUserApiKey();
+
                 Temperature temperature = temperatureRepository.findById(id)
+                                .filter(t -> t.getDevice().getApiKey().equals(currentUserApiKey))
                                 .orElseThrow(() -> new TemperatureNotFoundException(id));
 
                 // Create a link to itself
@@ -126,47 +175,9 @@ public class TemperatureController {
                 return EntityModel.of(temperature, selfLink, allLink, deviceLink);
         }
 
-        @ApiOperation("Update a temperature")
-        @PutMapping("/temperatures/{id}")
-        Temperature replaceTemperature(@RequestBody Temperature newTemperature, @PathVariable Long id) {
-                return temperatureRepository.findById(id)
-                                .map(temperature -> {
-                                        // Update temperature data
-                                        temperature.setTemperatureC(newTemperature.getTemperatureC());
-                                        temperature.setHumidityPercent(newTemperature.getHumidityPercent());
-                                        temperature.setTimestamp(newTemperature.getTimestamp());
-
-                                        // Fetch or create the device
-                                        Device device = deviceRepository
-                                                        .findByDeviceName(newTemperature.getDevice().getDeviceName())
-                                                        .orElse(deviceRepository.save(newTemperature.getDevice()));
-
-                                        // Associate the temperature with the device
-                                        temperature.setDevice(device);
-
-                                        // Save and return the updated temperature
-                                        return temperatureRepository.save(temperature);
-                                })
-                                .orElseGet(() -> {
-                                        // If temperature with given id is not found, create a new temperature
-                                        newTemperature.setId(id);
-
-                                        // Fetch or create the device
-                                        Device device = deviceRepository
-                                                        .findByDeviceName(newTemperature.getDevice().getDeviceName())
-                                                        .orElse(deviceRepository.save(newTemperature.getDevice()));
-
-                                        // Associate the temperature with the device
-                                        newTemperature.setDevice(device);
-
-                                        // Save and return the new temperature
-                                        return temperatureRepository.save(newTemperature);
-                                });
-        }
-
         @ApiOperation("Delete a temperature by ID")
         @DeleteMapping("/temperatures/{id}")
-        void deleteTemperature(@ApiParam("Temperature ID") @PathVariable Long id) {
+        void deleteTemperature(@ApiParam("Temperature ID") @PathVariable String id) {
                 // Check if the temperature exists
                 if (temperatureRepository.existsById(id)) {
                         // Delete the temperature by ID
@@ -181,9 +192,15 @@ public class TemperatureController {
         @ApiOperation("Get the latest temperature record")
         @GetMapping("/temperatures/latest")
         public ResponseEntity<EntityModel<Temperature>> getLatestTemperature() {
-                // Retrieve the latest temperature record from the repository
-                Temperature latestTemperature = temperatureRepository.findFirstByOrderByTimestampDesc()
-                                .orElseThrow(() -> new TemperatureNotFoundException("No temperature records found"));
+                String currentUserApiKey = getCurrentUserApiKey(); // Assuming you have a method to get the current
+                                                                   // user's API key
+
+                // Retrieve the latest temperature record associated with the current user's API
+                // key
+                Temperature latestTemperature = temperatureRepository
+                                .findFirstByDevice_ApiKeyOrderByTimestampDesc(currentUserApiKey)
+                                .orElseThrow(() -> new TemperatureNotFoundException(
+                                                "No temperature records found for the current user"));
 
                 // Format the timestamp into a human-readable string
                 Instant instant = Instant.ofEpochMilli(latestTemperature.getTimestamp());
@@ -216,39 +233,47 @@ public class TemperatureController {
                         @RequestParam(required = false) Integer month,
                         @RequestParam(required = false) Integer day,
                         @RequestParam(required = false) Integer hour,
+                        @RequestParam(required = false) Long startTimestamp,
+                        @RequestParam(required = false) Long endTimestamp,
                         @RequestParam(required = false) String deviceName,
+                        @RequestParam(required = false) String deviceId,
                         @RequestParam(required = false) String location) {
 
-                List<Temperature> filteredTemperatures = filterTemperatures(year, month, day, hour, deviceName,
-                                location);
+                List<Temperature> filteredTemperatures = filterTemperatures(year, month, day, hour, startTimestamp,
+                                endTimestamp, deviceName, deviceId, location);
 
                 List<EntityModel<Temperature>> temperatures = filteredTemperatures.stream()
                                 .map(temperature -> EntityModel.of(temperature,
                                                 linkTo(methodOn(TemperatureController.class).one(temperature.getId()))
                                                                 .withSelfRel(),
                                                 linkTo(methodOn(TemperatureController.class).allFiltered(year, month,
-                                                                day, hour, deviceName,
-                                                                location)).withRel("filteredTemperatures")))
+                                                                day, hour, startTimestamp,
+                                                                endTimestamp, deviceName, deviceId, location))
+                                                                .withRel("filteredTemperatures")))
                                 .collect(Collectors.toList());
 
                 return CollectionModel.of(temperatures,
-                                linkTo(methodOn(TemperatureController.class).allFiltered(year, month, day, hour,
-                                                deviceName, location))
+                                linkTo(methodOn(TemperatureController.class)
+                                                .allFiltered(year, month, day, hour, startTimestamp, endTimestamp,
+                                                                deviceName, deviceId, location))
                                                 .withSelfRel());
         }
 
-        @ApiOperation("Get average temperatureC and humidity percentage")
+        @ApiOperation("Get average temperatureC, humidity percentage, and dew point")
         @GetMapping("/temperatures/average")
         public ResponseEntity<Map<String, Object>> getAverage(
                         @RequestParam(required = false) Integer year,
                         @RequestParam(required = false) Integer month,
                         @RequestParam(required = false) Integer day,
                         @RequestParam(required = false) Integer hour,
+                        @RequestParam(required = false) Long startTimestamp,
+                        @RequestParam(required = false) Long endTimestamp,
                         @RequestParam(required = false) String deviceName,
+                        @RequestParam(required = false) String deviceId,
                         @RequestParam(required = false) String location) {
 
-                List<Temperature> filteredTemperatures = filterTemperatures(year, month, day, hour, deviceName,
-                                location);
+                List<Temperature> filteredTemperatures = filterTemperatures(year, month, day, hour, startTimestamp,
+                                endTimestamp, deviceName, deviceId, location);
 
                 // Calculate average temperatureC
                 OptionalDouble averageTemperatureC = filteredTemperatures.stream()
@@ -260,15 +285,22 @@ public class TemperatureController {
                                 .mapToDouble(Temperature::getHumidityPercent)
                                 .average();
 
+                // Calculate average dew point
+                OptionalDouble averageDewPoint = filteredTemperatures.stream()
+                                .mapToDouble(Temperature::getDewPoint)
+                                .average();
+
                 // Create the response map
                 Map<String, Object> responseMap = new HashMap<>();
-                responseMap.put("averageTemperatureC", averageTemperatureC.orElse(0.0));
-                responseMap.put("averageHumidityPercent", averageHumidityPercent.orElse(0.0));
+                responseMap.put("averageTemperatureC", Math.round(averageTemperatureC.orElse(0.0) * 10.0) / 10.0);
+                responseMap.put("averageHumidityPercent", Math.round(averageHumidityPercent.orElse(0.0) * 10.0) / 10.0);
+                responseMap.put("averageDewPoint", Math.round(averageDewPoint.orElse(0.0) * 10.0) / 10.0);
 
                 // Build self link with parameters if they exist
                 UriComponentsBuilder uriBuilder = WebMvcLinkBuilder
-                                .linkTo(methodOn(TemperatureController.class).getAverage(year, month, day, hour,
-                                                deviceName, location))
+                                .linkTo(methodOn(TemperatureController.class)
+                                                .getAverage(year, month, day, hour, startTimestamp, endTimestamp,
+                                                                deviceName, deviceId, location))
                                 .toUriComponentsBuilder();
                 String selfLink = uriBuilder.build().toUriString();
 
@@ -278,18 +310,21 @@ public class TemperatureController {
                 return ResponseEntity.ok(responseMap);
         }
 
-        @ApiOperation("Get minimum temperatureC and humidity percentage")
+        @ApiOperation("Get minimum temperatureC, humidity percentage, and dew point")
         @GetMapping("/temperatures/min")
         public ResponseEntity<Map<String, Object>> getMinimum(
                         @RequestParam(required = false) Integer year,
                         @RequestParam(required = false) Integer month,
                         @RequestParam(required = false) Integer day,
                         @RequestParam(required = false) Integer hour,
+                        @RequestParam(required = false) Long startTimestamp,
+                        @RequestParam(required = false) Long endTimestamp,
                         @RequestParam(required = false) String deviceName,
+                        @RequestParam(required = false) String deviceId,
                         @RequestParam(required = false) String location) {
 
-                List<Temperature> filteredTemperatures = filterTemperatures(year, month, day, hour, deviceName,
-                                location);
+                List<Temperature> filteredTemperatures = filterTemperatures(year, month, day, hour, startTimestamp,
+                                endTimestamp, deviceName, deviceId, location);
 
                 // Calculate minimum temperatureC
                 OptionalDouble minTemperatureC = filteredTemperatures.stream()
@@ -301,15 +336,22 @@ public class TemperatureController {
                                 .mapToDouble(Temperature::getHumidityPercent)
                                 .min();
 
+                // Calculate minimum dew point
+                OptionalDouble minDewPoint = filteredTemperatures.stream()
+                                .mapToDouble(Temperature::getDewPoint)
+                                .min();
+
                 // Build JSON response
                 Map<String, Object> minimums = new HashMap<>();
                 minimums.put("minTemperatureC", minTemperatureC.orElse(0.0));
                 minimums.put("minHumidityPercent", minHumidityPercent.orElse(0.0));
+                minimums.put("minDewPoint", minDewPoint.orElse(0.0));
 
                 // Build self link with parameters if they exist
                 UriComponentsBuilder uriBuilder = WebMvcLinkBuilder
-                                .linkTo(methodOn(TemperatureController.class).getMinimum(year, month, day, hour,
-                                                deviceName, location))
+                                .linkTo(methodOn(TemperatureController.class)
+                                                .getMinimum(year, month, day, hour, startTimestamp, endTimestamp,
+                                                                deviceName, deviceId, location))
                                 .toUriComponentsBuilder();
                 String selfLink = uriBuilder.build().toUriString();
 
@@ -319,18 +361,21 @@ public class TemperatureController {
                 return ResponseEntity.ok(minimums);
         }
 
-        @ApiOperation("Get maximum temperatureC and humidity percentage")
+        @ApiOperation("Get maximum temperatureC, humidity percentage, and dew point")
         @GetMapping("/temperatures/max")
         public ResponseEntity<Map<String, Object>> getMaximum(
                         @RequestParam(required = false) Integer year,
                         @RequestParam(required = false) Integer month,
                         @RequestParam(required = false) Integer day,
                         @RequestParam(required = false) Integer hour,
+                        @RequestParam(required = false) Long startTimestamp,
+                        @RequestParam(required = false) Long endTimestamp,
                         @RequestParam(required = false) String deviceName,
+                        @RequestParam(required = false) String deviceId,
                         @RequestParam(required = false) String location) {
 
-                List<Temperature> filteredTemperatures = filterTemperatures(year, month, day, hour, deviceName,
-                                location);
+                List<Temperature> filteredTemperatures = filterTemperatures(year, month, day, hour, startTimestamp,
+                                endTimestamp, deviceName, deviceId, location);
 
                 // Calculate maximum temperatureC
                 OptionalDouble maxTemperatureC = filteredTemperatures.stream()
@@ -342,15 +387,22 @@ public class TemperatureController {
                                 .mapToDouble(Temperature::getHumidityPercent)
                                 .max();
 
+                // Calculate maximum dew point
+                OptionalDouble maxDewPoint = filteredTemperatures.stream()
+                                .mapToDouble(Temperature::getDewPoint)
+                                .max();
+
                 // Build JSON response
                 Map<String, Object> maximums = new HashMap<>();
                 maximums.put("maxTemperatureC", maxTemperatureC.orElse(0.0));
                 maximums.put("maxHumidityPercent", maxHumidityPercent.orElse(0.0));
+                maximums.put("maxDewPoint", maxDewPoint.orElse(0.0));
 
                 // Build self link with parameters if they exist
                 UriComponentsBuilder uriBuilder = WebMvcLinkBuilder
-                                .linkTo(methodOn(TemperatureController.class).getMaximum(year, month, day, hour,
-                                                deviceName, location))
+                                .linkTo(methodOn(TemperatureController.class)
+                                                .getMaximum(year, month, day, hour, startTimestamp, endTimestamp,
+                                                                deviceName, deviceId, location))
                                 .toUriComponentsBuilder();
                 String selfLink = uriBuilder.build().toUriString();
 
@@ -360,18 +412,21 @@ public class TemperatureController {
                 return ResponseEntity.ok(maximums);
         }
 
-        @ApiOperation("Get median temperatureC and humidity percentage")
+        @ApiOperation("Get median temperatureC, humidity percentage, and dew point")
         @GetMapping("/temperatures/median")
         public ResponseEntity<Map<String, Object>> getMedian(
                         @RequestParam(required = false) Integer year,
                         @RequestParam(required = false) Integer month,
                         @RequestParam(required = false) Integer day,
                         @RequestParam(required = false) Integer hour,
+                        @RequestParam(required = false) Long startTimestamp,
+                        @RequestParam(required = false) Long endTimestamp,
                         @RequestParam(required = false) String deviceName,
+                        @RequestParam(required = false) String deviceId,
                         @RequestParam(required = false) String location) {
 
-                List<Temperature> filteredTemperatures = filterTemperatures(year, month, day, hour, deviceName,
-                                location);
+                List<Temperature> filteredTemperatures = filterTemperatures(year, month, day, hour, startTimestamp,
+                                endTimestamp, deviceName, deviceId, location);
 
                 // Calculate median temperatureC
                 OptionalDouble medianTemperatureC = filteredTemperatures.stream()
@@ -389,15 +444,25 @@ public class TemperatureController {
                                 .limit(1)
                                 .findFirst();
 
+                // Calculate median dew point
+                OptionalDouble medianDewPoint = filteredTemperatures.stream()
+                                .mapToDouble(Temperature::getDewPoint)
+                                .sorted()
+                                .skip(filteredTemperatures.size() / 2)
+                                .limit(1)
+                                .findFirst();
+
                 // Build JSON response
                 Map<String, Object> medians = new HashMap<>();
                 medians.put("medianTemperatureC", medianTemperatureC.orElse(0.0));
                 medians.put("medianHumidityPercent", medianHumidityPercent.orElse(0.0));
+                medians.put("medianDewPoint", medianDewPoint.orElse(0.0));
 
                 // Build self link with parameters if they exist
                 UriComponentsBuilder uriBuilder = WebMvcLinkBuilder
-                                .linkTo(methodOn(TemperatureController.class).getMedian(year, month, day, hour,
-                                                deviceName, location))
+                                .linkTo(methodOn(TemperatureController.class)
+                                                .getMedian(year, month, day, hour, startTimestamp, endTimestamp,
+                                                                deviceName, deviceId, location))
                                 .toUriComponentsBuilder();
                 String selfLink = uriBuilder.build().toUriString();
 
@@ -410,11 +475,15 @@ public class TemperatureController {
         // HELPERS
 
         private List<Temperature> filterTemperatures(Integer year, Integer month, Integer day, Integer hour,
-                        String deviceName, String location) {
+                        Long startTimestamp, Long endTimestamp,
+                        String deviceName, String deviceId, String location) {
+                String currentUserApiKey = getCurrentUserApiKey();
                 List<Temperature> allTemperatures = temperatureRepository.findAll();
                 Stream<Temperature> temperatureStream = allTemperatures.stream();
 
                 // Apply filters based on parameters
+                temperatureStream = temperatureStream.filter(t -> t.getDevice().getApiKey().equals(currentUserApiKey));
+
                 if (year != null)
                         temperatureStream = temperatureStream
                                         .filter(t -> getYearFromTimestamp(t.getTimestamp()) == year);
@@ -429,9 +498,18 @@ public class TemperatureController {
                 if (deviceName != null)
                         temperatureStream = temperatureStream
                                         .filter(t -> t.getDevice().getDeviceName().equalsIgnoreCase(deviceName));
+                if (deviceId != null)
+                        temperatureStream = temperatureStream
+                                        .filter(t -> t.getDevice().getId().equalsIgnoreCase(deviceId));
                 if (location != null)
                         temperatureStream = temperatureStream
                                         .filter(t -> t.getDevice().getLocation().equalsIgnoreCase(location));
+
+                // Filter temperatures between start and end timestamps
+                if (startTimestamp != null && endTimestamp != null)
+                        temperatureStream = temperatureStream.filter(
+                                        t -> t.getTimestamp() >= startTimestamp && t.getTimestamp() <= endTimestamp);
+
                 return temperatureStream.collect(Collectors.toList());
         }
 
@@ -450,4 +528,5 @@ public class TemperatureController {
         private int getHourFromTimestamp(long timestamp) {
                 return LocalDateTime.ofInstant(Instant.ofEpochMilli(timestamp), ZoneId.systemDefault()).getHour();
         }
+
 }

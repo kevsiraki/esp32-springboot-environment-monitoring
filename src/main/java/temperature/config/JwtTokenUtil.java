@@ -15,9 +15,9 @@ import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.security.Keys;
 import java.nio.charset.StandardCharsets;
-import java.security.Key; // Add this import
+import java.security.Key;
 import java.util.Base64;
-import javax.crypto.spec.SecretKeySpec; // Add this import
+import javax.crypto.spec.SecretKeySpec;
 
 @Component
 public class JwtTokenUtil implements Serializable {

@@ -1,5 +1,6 @@
 package temperature.config;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -16,6 +17,8 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.http.HttpMethod;
 
+import temperature.repository.UserRepository;
+
 @Configuration
 @EnableWebSecurity
 @EnableGlobalMethodSecurity(prePostEnabled = true)
@@ -29,6 +32,12 @@ public class WebSecurityConfig extends WebSecurityConfigurerAdapter {
 
 	@Autowired
 	private JwtRequestFilter jwtRequestFilter;
+
+	@Autowired
+	private ObjectMapper objectMapper; // Inject ObjectMapper
+
+	@Autowired
+	private UserRepository userRepository; // Inject UserRepository
 
 	@Override
 	public void configure(AuthenticationManagerBuilder auth) throws Exception {
@@ -49,17 +58,26 @@ public class WebSecurityConfig extends WebSecurityConfigurerAdapter {
 		return super.authenticationManagerBean();
 	}
 
+	@Bean
+	@Autowired // Inject ObjectMapper bean
+	public ApiKeyValidationFilter apiKeyValidationFilter(ObjectMapper objectMapper, UserRepository userRepository) {
+		return new ApiKeyValidationFilter(objectMapper, userRepository);
+	}
+
 	@Override
 	protected void configure(HttpSecurity httpSecurity) throws Exception {
 		// We don't need CSRF for this example
 		httpSecurity.csrf().disable()
-				// Permit access to /authenticate without authentication
-				.authorizeRequests().antMatchers(HttpMethod.POST).permitAll()
-				// Permit access to GET requests without authentication
-				.antMatchers(HttpMethod.GET).permitAll()
+				// Permit access to /authenticate, /api/login, and /api/register without
+				// authentication
+				.authorizeRequests()
+				.antMatchers(HttpMethod.POST, "/authenticate", "/api/login", "/api/register").permitAll()
+				.antMatchers(HttpMethod.GET, "/swagger-ui.html/**", "/swagger-ui/**", "/webjars/**", "/swagger-resources/**", "/v2/api-docs/**").permitAll()
 				// Require authentication for PUT and DELETE requests
 				.antMatchers(HttpMethod.PUT, "/temperature/**").authenticated()
 				.antMatchers(HttpMethod.DELETE, "/temperatures/**").authenticated()
+				// Require valid API key for accessing /devices/** and /temperatures/**
+				.antMatchers(HttpMethod.GET, "/devices/**", "/temperatures/**").authenticated()
 				// all other requests need to be authenticated
 				.anyRequest().authenticated()
 				.and()
@@ -67,10 +85,14 @@ public class WebSecurityConfig extends WebSecurityConfigurerAdapter {
 				// store user's state.
 				.exceptionHandling().authenticationEntryPoint(jwtAuthenticationEntryPoint)
 				.and().sessionManagement()
-				.sessionCreationPolicy(SessionCreationPolicy.STATELESS);
-
-		// Add a filter to validate the tokens with every request
-		httpSecurity.addFilterBefore(jwtRequestFilter, UsernamePasswordAuthenticationFilter.class);
+				.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+				.and()
+				// Add custom filter to validate API key in headers for GET and POST requests to
+				// /temperatures/** and /devices/**
+				.addFilterBefore(apiKeyValidationFilter(objectMapper, userRepository),
+						UsernamePasswordAuthenticationFilter.class)
+				// Disable the default security filter for login endpoint
+				.formLogin().disable();
 	}
 
 }

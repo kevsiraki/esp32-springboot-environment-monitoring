@@ -1,39 +1,23 @@
 package temperature.controller;
 
 import temperature.model.*;
-import temperature.startup.*;
 import temperature.repository.*;
 import temperature.exception.*;
 
 import static org.springframework.hateoas.server.mvc.WebMvcLinkBuilder.*;
 import org.springframework.hateoas.server.mvc.WebMvcLinkBuilder;
-import org.springframework.web.util.UriComponentsBuilder;
-import org.springframework.hateoas.Link;
 
-import java.time.LocalDateTime;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
-import java.time.ZonedDateTime;
-import java.time.Instant;
-
-import java.util.OptionalDouble;
-import java.util.function.ToDoubleFunction;
 import java.util.List;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Optional;
 
 import org.springframework.hateoas.CollectionModel;
 import org.springframework.hateoas.EntityModel;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.format.annotation.DateTimeFormat;
-import org.springframework.format.annotation.DateTimeFormat.ISO;
-import org.springframework.http.ResponseEntity;
-
 import io.swagger.annotations.ApiOperation;
 import io.swagger.annotations.ApiParam;
+
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 
 @RestController
 public class DeviceController {
@@ -44,16 +28,13 @@ public class DeviceController {
         this.deviceRepository = deviceRepository;
     }
 
-    @ApiOperation("Add a new device")
-    @PostMapping("/devices")
-    Device newDevice(@RequestBody Device device) {
-        return deviceRepository.save(device);
-    }
-
-    @ApiOperation("Get all devices")
+    @ApiOperation("Get all devices associated with the API key")
     @GetMapping("/devices")
     CollectionModel<EntityModel<Device>> all() {
+        String currentUserApiKey = getCurrentUserApiKey();
+
         List<EntityModel<Device>> devices = deviceRepository.findAll().stream()
+                .filter(device -> device.getApiKey().equals(currentUserApiKey))
                 .map(device -> EntityModel.of(device,
                         linkTo(methodOn(DeviceController.class).one(device.getId())).withSelfRel(),
                         linkTo(methodOn(DeviceController.class).all()).withRel("devices")))
@@ -62,10 +43,13 @@ public class DeviceController {
         return CollectionModel.of(devices, linkTo(methodOn(DeviceController.class).all()).withSelfRel());
     }
 
-    @ApiOperation("Get a device by ID")
+    @ApiOperation("Get a device by ID associated with the API key")
     @GetMapping("/devices/{id}")
-    EntityModel<Device> one(@ApiParam("Device ID") @PathVariable Long id) {
+    EntityModel<Device> one(@ApiParam("Device ID") @PathVariable String id) {
+        String currentUserApiKey = getCurrentUserApiKey();
+
         Device device = deviceRepository.findById(id)
+                .filter(d -> d.getApiKey().equals(currentUserApiKey))
                 .orElseThrow(() -> new DeviceNotFoundException(id));
 
         return EntityModel.of(device,
@@ -73,28 +57,13 @@ public class DeviceController {
                 linkTo(methodOn(DeviceController.class).all()).withRel("devices"));
     }
 
-    @ApiOperation("Update a device")
-    @PutMapping("/devices/{id}")
-    Device replaceDevice(@RequestBody Device newDevice, @PathVariable Long id) {
-        return deviceRepository.findById(id)
-                .map(device -> {
-                    device.setDeviceName(newDevice.getDeviceName());
-                    device.setLocation(newDevice.getLocation());
-                    return deviceRepository.save(device);
-                })
-                .orElseGet(() -> {
-                    newDevice.setId(id);
-                    return deviceRepository.save(newDevice);
-                });
-    }
-
-    @ApiOperation("Delete a device by ID")
-    @DeleteMapping("/devices/{id}")
-    void deleteDevice(@ApiParam("Device ID") @PathVariable Long id) {
-        if (deviceRepository.existsById(id)) {
-            deviceRepository.deleteById(id);
+    private String getCurrentUserApiKey() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication != null && authentication.getPrincipal() instanceof User) {
+            User userDetails = (User) authentication.getPrincipal();
+            return userDetails.getApiKey();
         } else {
-            throw new DeviceNotFoundException(id);
+            throw new RuntimeException("Unable to retrieve current user's API key");
         }
     }
 }
