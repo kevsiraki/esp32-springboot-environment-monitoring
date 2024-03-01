@@ -18,6 +18,12 @@ import java.io.IOException;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
 public class ApiKeyValidationFilter extends GenericFilterBean {
 
     private static final int MAX_REQUESTS_PER_MINUTE = 100;
@@ -47,6 +53,9 @@ public class ApiKeyValidationFilter extends GenericFilterBean {
             return;
         }
 
+        // Schedule removal of IP address entry after a minute
+        scheduleReset(ipAddress);
+
         // Extract the request URI
         if (requestUri.startsWith("/temperatures") || requestUri.startsWith("/devices")) {
             // Extract API key from request headers
@@ -64,6 +73,11 @@ public class ApiKeyValidationFilter extends GenericFilterBean {
         }
 
         chain.doFilter(request, response);
+    }
+
+    private void scheduleReset(String ipAddress) {
+        ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+        scheduler.schedule(() -> requestCounts.remove(ipAddress), 1, TimeUnit.MINUTES);
     }
 
     private String getClientIpAddress(HttpServletRequest request) {

@@ -10,8 +10,9 @@ import java.util.Optional;
 public interface DeviceRepository extends JpaRepository<Device, String> {
     Optional<Device> findByDeviceName(String deviceName);
 
-    // Add the custom query method to find a device by name and API key
     Optional<Device> findByDeviceNameAndApiKey(String deviceName, String apiKey);
+
+    Optional<Device> findByApiKey(String apiKey);
 
     Optional<Device> findByLocation(String location);
 }

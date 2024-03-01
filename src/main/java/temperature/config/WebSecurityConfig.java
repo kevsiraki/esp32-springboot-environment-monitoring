@@ -72,7 +72,9 @@ public class WebSecurityConfig extends WebSecurityConfigurerAdapter {
 				// authentication
 				.authorizeRequests()
 				.antMatchers(HttpMethod.POST, "/authenticate", "/api/login", "/api/register").permitAll()
-				.antMatchers(HttpMethod.GET, "/swagger-ui.html/**", "/swagger-ui/**", "/webjars/**", "/swagger-resources/**", "/v2/api-docs/**").permitAll()
+				.antMatchers(HttpMethod.GET, "/swagger-ui.html/**", "/swagger-ui/**", "/webjars/**",
+						"/swagger-resources/**", "/v2/api-docs/**")
+				.permitAll()
 				// Require authentication for PUT and DELETE requests
 				.antMatchers(HttpMethod.PUT, "/temperature/**").authenticated()
 				.antMatchers(HttpMethod.DELETE, "/temperatures/**").authenticated()

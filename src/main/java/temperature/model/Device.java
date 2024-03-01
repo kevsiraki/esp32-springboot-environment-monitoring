@@ -8,20 +8,22 @@ import javax.persistence.Id;
 import javax.persistence.Column;
 
 import java.util.UUID;
-
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonInclude.Include;
 @Entity
+@JsonInclude(Include.NON_NULL)
 public class Device {
     @Id
     @GeneratedValue(generator = "uuid2")
     @GenericGenerator(name = "uuid2", strategy = "org.hibernate.id.UUIDGenerator")
     @Column(name = "id", updatable = false, nullable = false, columnDefinition = "VARCHAR(36)")
-    private String id; // Use String type for UUID
+    private String id;
 
     private String deviceName;
     private String location;
     private String apiKey;
 
-    // Constructors
     public Device() {
     }
 
@@ -60,18 +62,10 @@ public class Device {
         this.location = location;
     }
 
-    // Method to append a unique suffix to the device name
-    private String appendUniqueSuffix(String deviceName, String apiKey) {
-        // Implement your logic here to append a unique suffix based on the apiKey
-        return deviceName + "_" + apiKey.substring(0, 5); // Example logic, customize as needed
-    }
-
-    // Add getter for API key
     public String getApiKey() {
         return apiKey;
     }
 
-    // Add setter for API key
     public void setApiKey(String apiKey) {
         this.apiKey = apiKey;
     }

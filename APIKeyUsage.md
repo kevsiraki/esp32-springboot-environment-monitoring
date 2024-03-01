@@ -74,7 +74,7 @@ To log in and obtain an API key, you can use the following endpoint:
 ### Example Usage:
 
 `POST /api/login?regen=false HTTP/1.1
-Content-Type: application/json
+Content-Type: application/json`
 
 ```json
 {

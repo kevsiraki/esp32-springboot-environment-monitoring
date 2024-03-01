@@ -5,10 +5,33 @@ import temperature.model.*;
 import temperature.startup.*;
 import temperature.repository.*;
 
+import io.swagger.annotations.ApiOperation;
+import io.swagger.annotations.ApiParam;
+
 import static org.springframework.hateoas.server.mvc.WebMvcLinkBuilder.*;
 import org.springframework.hateoas.server.mvc.WebMvcLinkBuilder;
 import org.springframework.web.util.UriComponentsBuilder;
 import org.springframework.hateoas.Link;
+import org.springframework.hateoas.CollectionModel;
+import org.springframework.hateoas.EntityModel;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.format.annotation.DateTimeFormat.ISO;
+import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Service;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.cache.annotation.CacheConfig;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.cache.annotation.CachePut;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.hateoas.IanaLinkRelations;
+import org.springframework.data.redis.RedisConnectionFailureException;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -26,19 +49,11 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-
-import org.springframework.hateoas.CollectionModel;
-import org.springframework.hateoas.EntityModel;
-import org.springframework.web.bind.annotation.*;
-import org.springframework.format.annotation.DateTimeFormat;
-import org.springframework.format.annotation.DateTimeFormat.ISO;
-import org.springframework.http.ResponseEntity;
-
-import io.swagger.annotations.ApiOperation;
-import io.swagger.annotations.ApiParam;
-
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.context.SecurityContextHolder;
+import java.util.Collections;
+import java.util.Objects;
+import java.util.ArrayList;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 @RestController
 public class TemperatureController {
@@ -51,8 +66,14 @@ public class TemperatureController {
                 this.deviceRepository = deviceRepository;
         }
 
+        @Autowired
+        private RedisTemplate<String, Object> redisTemplate;
+
+        // General CRUD Endpoints
+
         @ApiOperation("Add a new temperature reading")
         @PostMapping("/temperatures")
+        @CachePut(value = "temperatures", key = "#result.id")
         public Temperature newTemperature(@RequestBody Temperature temperatureRequest) {
                 // Check if device is provided in the request
                 if (temperatureRequest.getDevice() == null) {
@@ -62,117 +83,278 @@ public class TemperatureController {
                 // Get the current user's API key
                 String currentUserApiKey = getCurrentUserApiKey();
 
-                // Check if device exists for the current user's API key
-                Optional<Device> existingDevice = deviceRepository.findByDeviceNameAndApiKey(
+                // Find device by name and API key
+                Optional<Device> existingDeviceOptional = deviceRepository.findByDeviceNameAndApiKey(
                                 temperatureRequest.getDevice().getDeviceName(), currentUserApiKey);
 
-                Device device;
-                if (existingDevice.isPresent()) {
-                        device = existingDevice.get();
-                } else {
-                        // Check if the device name exists for any API key
-                        Optional<Device> deviceWithSameName = deviceRepository
-                                        .findByDeviceName(temperatureRequest.getDevice().getDeviceName());
-                        if (deviceWithSameName.isPresent()) {
-                                // Append a unique suffix to the device name
-                                String uniqueDeviceName = appendUniqueSuffix(
-                                                temperatureRequest.getDevice().getDeviceName());
-                                // Create a new device associated with the current user's API key and unique
-                                // device name
-                                device = new Device(uniqueDeviceName, temperatureRequest.getDevice().getLocation(),
-                                                currentUserApiKey);
-                        } else {
-                                // Create a new device associated with the current user's API key
-                                device = new Device(temperatureRequest.getDevice().getDeviceName(),
-                                                temperatureRequest.getDevice().getLocation(), currentUserApiKey);
-                        }
+                // Create or update the device
+                Device device = existingDeviceOptional.orElse(new Device());
+
+                // Set device properties
+                device.setDeviceName(temperatureRequest.getDevice().getDeviceName());
+                device.setApiKey(currentUserApiKey);
+
+                // Check if the device location is provided and different from the existing
+                // location
+                if (temperatureRequest.getDevice().getLocation() != null &&
+                                !Objects.equals(device.getLocation(), temperatureRequest.getDevice().getLocation())) {
+                        device.setLocation(temperatureRequest.getDevice().getLocation());
                 }
 
-                // Save the device to the database
-                deviceRepository.save(device);
+                // Save the device
+                device = deviceRepository.save(device);
 
                 // Associate the device with the temperature
                 temperatureRequest.setDevice(device);
 
+                // Generate UUID for the temperature
+                temperatureRequest.setId(UUID.randomUUID().toString());
+
                 // Create a new Temperature object with the provided data
                 Temperature newTemperature = new Temperature(temperatureRequest.getTemperatureC(),
-                                temperatureRequest.getHumidityPercent(), System.currentTimeMillis(), device);
+                                temperatureRequest.getHumidityPercent(), 0, device); // Setting timestamp to 0
+                                                                                     // temporarily
 
                 // Calculate and set the dew point
                 newTemperature.calculateAndSetDewPoint();
 
+                // Set the current timestamp
+                newTemperature.setTimestamp(System.currentTimeMillis());
+
                 // Save the temperature
-                return temperatureRepository.save(newTemperature);
-        }
+                newTemperature = temperatureRepository.save(newTemperature);
 
-        private String getCurrentUserApiKey() {
-                // Retrieve the current authentication object
-                Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-                if (authentication != null && authentication.getPrincipal() instanceof User) {
-                        // Assuming UserDetails contains the API key information
-                        User userDetails = (User) authentication.getPrincipal();
-                        return userDetails.getApiKey();
-                } else {
-                        throw new RuntimeException("Unable to retrieve current user's API key");
-                }
-        }
-
-        public String appendUniqueSuffix(String deviceName) {
-                // Implement logic to generate a unique suffix and append it to the device name
-                // For example, you can use a random UUID suffix
-                String uniqueSuffix = UUID.randomUUID().toString().substring(0, 6);
-                return deviceName + "_" + uniqueSuffix;
-        }
-
-        @ApiOperation("Get all temperatures")
-        @GetMapping("/temperatures")
-        CollectionModel<EntityModel<Temperature>> all() {
-                String currentUserApiKey = getCurrentUserApiKey();
-
-                List<EntityModel<Temperature>> temperatures = temperatureRepository.findAll().stream()
-                                .filter(temperature -> temperature.getDevice().getApiKey().equals(currentUserApiKey))
-                                .map(temperature -> {
-                                        // Create a link to the temperature's details
-                                        Link selfLink = linkTo(
-                                                        methodOn(TemperatureController.class).one(temperature.getId()))
-                                                        .withSelfRel();
-
-                                        // Create a link to the device associated with this temperature
-                                        Link deviceLink = linkTo(methodOn(DeviceController.class)
-                                                        .one(temperature.getDevice().getId()))
-                                                        .withRel("device");
-
-                                        // Create an EntityModel for the temperature including links
-                                        return EntityModel.of(temperature, selfLink, deviceLink);
-                                })
-                                .collect(Collectors.toList());
-
-                // Return the collection model with links
-                return CollectionModel.of(temperatures,
-                                linkTo(methodOn(TemperatureController.class).all()).withSelfRel());
+                // Return the saved temperature
+                return newTemperature;
         }
 
         @ApiOperation("Get a temperature by ID")
         @GetMapping("/temperatures/{id}")
-        EntityModel<Temperature> one(@ApiParam("Temperature ID") @PathVariable String id) {
+        public EntityModel<Temperature> one(@ApiParam("Temperature ID") @PathVariable String id) {
                 String currentUserApiKey = getCurrentUserApiKey();
 
-                Temperature temperature = temperatureRepository.findById(id)
-                                .filter(t -> t.getDevice().getApiKey().equals(currentUserApiKey))
-                                .orElseThrow(() -> new TemperatureNotFoundException(id));
+                // Check if the data exists in Redis cache
+                ValueOperations<String, Object> operations = redisTemplate.opsForValue();
+                String cacheKey = "temperatures::" + id;
+                boolean existsInCache;
+                Temperature temperature;
+
+                try {
+                        existsInCache = redisTemplate.hasKey(cacheKey);
+
+                        if (existsInCache) {
+                                // Retrieve data from cache
+                                temperature = (Temperature) operations.get(cacheKey);
+                        } else {
+                                // Retrieve data from database
+                                temperature = temperatureRepository.findById(id)
+                                                .filter(t -> t.getDevice().getApiKey().equals(currentUserApiKey))
+                                                .orElseThrow(() -> new TemperatureNotFoundException(id));
+
+                                // Store data in cache
+                                operations.set(cacheKey, temperature);
+                                redisTemplate.expire(cacheKey, 1, TimeUnit.HOURS); // Set expiration time (e.g., 1 hour)
+                        }
+                } catch (RedisConnectionFailureException e) {
+                        temperature = temperatureRepository.findById(id)
+                                        .filter(t -> t.getDevice().getApiKey().equals(currentUserApiKey))
+                                        .orElseThrow(() -> new TemperatureNotFoundException(id));
+                }
 
                 // Create a link to itself
                 Link selfLink = linkTo(methodOn(TemperatureController.class).one(id)).withSelfRel();
 
                 // Create a link to retrieve all temperatures
-                Link allLink = linkTo(methodOn(TemperatureController.class).all()).withRel("temperatures");
-
+                int defaultPage = 0; // or whatever default page number you want
+                int defaultSize = 10; // or whatever default page size you want
+                Link allLink = linkTo(methodOn(TemperatureController.class).all(defaultPage, defaultSize))
+                                .withRel("temperatures");
                 // Create a link to the device associated with this temperature
                 Link deviceLink = linkTo(methodOn(DeviceController.class).one(temperature.getDevice().getId()))
                                 .withRel("device");
 
-                // Create an EntityModel for the temperature including links
-                return EntityModel.of(temperature, selfLink, allLink, deviceLink);
+                // Create an EntityModel for the temperature
+                EntityModel<Temperature> entityModel = EntityModel.of(temperature, selfLink, allLink, deviceLink);
+
+                return entityModel;
+        }
+
+        @ApiOperation("Get all temperatures with pagination")
+        @GetMapping("/temperatures")
+        public ResponseEntity<CollectionModel<EntityModel<Temperature>>> all(
+                        @RequestParam(defaultValue = "0") int page,
+                        @RequestParam(defaultValue = "10") int size) {
+
+                String currentUserApiKey = getCurrentUserApiKey();
+
+                List<EntityModel<Temperature>> temperatures = new ArrayList<>();
+                Page<Temperature> temperaturePage = null;
+
+                try {
+                        // Check if the page exists in the cache
+                        String cachePageKey = "temperatures::page::" + page + "::size::" + size;
+                        if (redisTemplate.hasKey(cachePageKey)) {
+                                // If found in cache, retrieve it from cache
+                                List<Temperature> cachedTemperatures = (List<Temperature>) redisTemplate.opsForValue()
+                                                .get(cachePageKey);
+                                for (Temperature temperature : cachedTemperatures) {
+                                        temperatures.add(buildTemperatureEntityModel(temperature));
+                                }
+                        } else {
+                                // If not found in cache, retrieve it from the database
+                                temperaturePage = temperatureRepository.findAll(PageRequest.of(page, size));
+                                List<Temperature> temperatureList = temperaturePage.getContent();
+                                for (Temperature temperature : temperatureList) {
+                                        temperatures.add(buildTemperatureEntityModel(temperature));
+                                }
+                                // Store page data in cache
+                                redisTemplate.opsForValue().set(cachePageKey, temperatureList);
+                                redisTemplate.expire(cachePageKey, 1, TimeUnit.HOURS);
+                        }
+
+                        // Add pagination links
+                        CollectionModel<EntityModel<Temperature>> model = CollectionModel.of(temperatures,
+                                        linkTo(methodOn(TemperatureController.class).all(page, size)).withSelfRel());
+
+                        if (temperaturePage != null && temperaturePage.hasNext()) {
+                                model.add(linkTo(methodOn(TemperatureController.class).all(page + 1, size))
+                                                .withRel(IanaLinkRelations.NEXT));
+                        }
+                        if (temperaturePage != null && temperaturePage.hasPrevious()) {
+                                model.add(linkTo(methodOn(TemperatureController.class).all(page - 1, size))
+                                                .withRel(IanaLinkRelations.PREVIOUS));
+                        }
+
+                        return ResponseEntity.ok(model);
+
+                } catch (RedisConnectionFailureException e) {
+                        e.printStackTrace();
+
+                        // If Redis is unavailable, retrieve data from the database directly
+                        List<Temperature> temperatureList = temperatureRepository.findAll(PageRequest.of(page, size))
+                                        .getContent();
+                        for (Temperature temperature : temperatureList) {
+                                if (temperature.getDevice().getApiKey().equals(currentUserApiKey)) {
+                                        temperatures.add(buildTemperatureEntityModel(temperature));
+                                }
+                        }
+
+                        // Return response without pagination since Redis is unavailable
+                        CollectionModel<EntityModel<Temperature>> model = CollectionModel.of(temperatures);
+                        return ResponseEntity.ok(model);
+                }
+        }
+
+        @ApiOperation("Get all temperatures with filters")
+        @GetMapping("/temperatures/filtered")
+        public ResponseEntity<CollectionModel<EntityModel<Temperature>>> allFiltered(
+                        @RequestParam(required = false) Integer year,
+                        @RequestParam(required = false) Integer month,
+                        @RequestParam(required = false) Integer day,
+                        @RequestParam(required = false) Integer hour,
+                        @RequestParam(required = false) Long startTimestamp,
+                        @RequestParam(required = false) Long endTimestamp,
+                        @RequestParam(required = false) String deviceName,
+                        @RequestParam(required = false) String deviceId,
+                        @RequestParam(required = false) String location,
+                        @RequestParam(defaultValue = "0") int page,
+                        @RequestParam(defaultValue = "10") int size) {
+
+                List<Temperature> filteredTemperatures = null;
+
+                try {
+                        // Check if the filtered data exists in the cache
+                        String cacheKey = constructCacheKey(year, month, day, hour, startTimestamp, endTimestamp,
+                                        deviceName, deviceId, location, page, size);
+                        if (redisTemplate.hasKey(cacheKey)) {
+                                // If found in cache, retrieve it from cache
+                                filteredTemperatures = (List<Temperature>) redisTemplate.opsForValue().get(cacheKey);
+                        } else {
+                                // If not found in cache, fetch from the database
+                                filteredTemperatures = filterTemperatures(year, month, day, hour, startTimestamp,
+                                                endTimestamp, deviceName, deviceId, location);
+                                // Store filtered data in cache
+                                redisTemplate.opsForValue().set(cacheKey, filteredTemperatures);
+                                redisTemplate.expire(cacheKey, 1, TimeUnit.HOURS); // Cache expiration time
+                        }
+                } catch (Exception e) {
+                        // Log the exception
+                        e.printStackTrace();
+                        // Fallback to fetching data from the database
+                        filteredTemperatures = fetchFromDatabase(year, month, day, hour, startTimestamp, endTimestamp,
+                                        deviceName, deviceId, location);
+                }
+
+                List<EntityModel<Temperature>> temperatures = paginateData(filteredTemperatures, page, size);
+
+                // Add pagination links
+                CollectionModel<EntityModel<Temperature>> model = constructModel(temperatures, year, month, day, hour,
+                                startTimestamp, endTimestamp, deviceName, deviceId, location, page, size);
+                return ResponseEntity.ok(model);
+        }
+
+        private String constructCacheKey(Integer year, Integer month, Integer day, Integer hour, Long startTimestamp,
+                        Long endTimestamp, String deviceName, String deviceId, String location, int page, int size) {
+                return String.format(
+                                "temperatures::filtered::year::%d::month::%d::day::%d::hour::%d::startTimestamp::%d::endTimestamp::%d::deviceName::%s::deviceId::%s::location::%s::page::%d::size::%d",
+                                year != null ? year : -1,
+                                month != null ? month : -1,
+                                day != null ? day : -1,
+                                hour != null ? hour : -1,
+                                startTimestamp != null ? startTimestamp : -1,
+                                endTimestamp != null ? endTimestamp : -1,
+                                deviceName != null ? deviceName : "null",
+                                deviceId != null ? deviceId : "null",
+                                location != null ? location : "null",
+                                page, size);
+        }
+
+        private List<Temperature> fetchFromDatabase(Integer year, Integer month, Integer day, Integer hour,
+                        Long startTimestamp, Long endTimestamp, String deviceName, String deviceId, String location) {
+                return filterTemperatures(year, month, day, hour, startTimestamp, endTimestamp, deviceName, deviceId,
+                                location);
+        }
+
+        private List<EntityModel<Temperature>> paginateData(List<Temperature> data, int page, int size) {
+                int startIndex = page * size;
+                int endIndex = Math.min(startIndex + size, data.size());
+                List<Temperature> paginatedData = data.subList(startIndex, endIndex);
+
+                List<EntityModel<Temperature>> paginatedModels = new ArrayList<>();
+                for (Temperature temperature : paginatedData) {
+                        paginatedModels.add(EntityModel.of(temperature,
+                                        linkTo(methodOn(TemperatureController.class).one(temperature.getId()))
+                                                        .withSelfRel(),
+                                        linkTo(methodOn(TemperatureController.class).allFiltered(null, null, null, null,
+                                                        null, null, null, null, null, page, size))
+                                                        .withRel("filteredTemperatures")));
+                }
+
+                return paginatedModels;
+        }
+
+        private CollectionModel<EntityModel<Temperature>> constructModel(List<EntityModel<Temperature>> temperatures,
+                        Integer year, Integer month, Integer day, Integer hour, Long startTimestamp, Long endTimestamp,
+                        String deviceName, String deviceId, String location, int page, int size) {
+                CollectionModel<EntityModel<Temperature>> model = CollectionModel.of(temperatures,
+                                linkTo(methodOn(TemperatureController.class).allFiltered(year, month, day, hour,
+                                                startTimestamp,
+                                                endTimestamp, deviceName, deviceId, location, page, size))
+                                                .withSelfRel());
+
+                if (temperatures.size() > (page + 1) * size) {
+                        model.add(linkTo(methodOn(TemperatureController.class).allFiltered(year, month, day, hour,
+                                        startTimestamp,
+                                        endTimestamp, deviceName, deviceId, location, page + 1, size))
+                                        .withRel(IanaLinkRelations.NEXT));
+                }
+                if (page > 0) {
+                        model.add(linkTo(methodOn(TemperatureController.class).allFiltered(year, month, day, hour,
+                                        startTimestamp,
+                                        endTimestamp, deviceName, deviceId, location, page - 1, size))
+                                        .withRel(IanaLinkRelations.PREVIOUS));
+                }
+                return model;
         }
 
         @ApiOperation("Delete a temperature by ID")
@@ -187,7 +369,7 @@ public class TemperatureController {
                 }
         }
 
-        // Public Statistical Endpoints
+        // Statistical Endpoints
 
         @ApiOperation("Get the latest temperature record")
         @GetMapping("/temperatures/latest")
@@ -224,39 +406,6 @@ public class TemperatureController {
 
                 // Return the response with HTTP status OK
                 return ResponseEntity.ok(temperatureEntityModel);
-        }
-
-        @ApiOperation("Get all temperatures with filters")
-        @GetMapping("/temperatures/filtered")
-        public CollectionModel<EntityModel<Temperature>> allFiltered(
-                        @RequestParam(required = false) Integer year,
-                        @RequestParam(required = false) Integer month,
-                        @RequestParam(required = false) Integer day,
-                        @RequestParam(required = false) Integer hour,
-                        @RequestParam(required = false) Long startTimestamp,
-                        @RequestParam(required = false) Long endTimestamp,
-                        @RequestParam(required = false) String deviceName,
-                        @RequestParam(required = false) String deviceId,
-                        @RequestParam(required = false) String location) {
-
-                List<Temperature> filteredTemperatures = filterTemperatures(year, month, day, hour, startTimestamp,
-                                endTimestamp, deviceName, deviceId, location);
-
-                List<EntityModel<Temperature>> temperatures = filteredTemperatures.stream()
-                                .map(temperature -> EntityModel.of(temperature,
-                                                linkTo(methodOn(TemperatureController.class).one(temperature.getId()))
-                                                                .withSelfRel(),
-                                                linkTo(methodOn(TemperatureController.class).allFiltered(year, month,
-                                                                day, hour, startTimestamp,
-                                                                endTimestamp, deviceName, deviceId, location))
-                                                                .withRel("filteredTemperatures")))
-                                .collect(Collectors.toList());
-
-                return CollectionModel.of(temperatures,
-                                linkTo(methodOn(TemperatureController.class)
-                                                .allFiltered(year, month, day, hour, startTimestamp, endTimestamp,
-                                                                deviceName, deviceId, location))
-                                                .withSelfRel());
         }
 
         @ApiOperation("Get average temperatureC, humidity percentage, and dew point")
@@ -529,4 +678,37 @@ public class TemperatureController {
                 return LocalDateTime.ofInstant(Instant.ofEpochMilli(timestamp), ZoneId.systemDefault()).getHour();
         }
 
+        private String getCurrentUserApiKey() {
+                // Retrieve the current authentication object
+                Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+                if (authentication != null && authentication.getPrincipal() instanceof User) {
+                        // Assuming UserDetails contains the API key information
+                        User userDetails = (User) authentication.getPrincipal();
+                        return userDetails.getApiKey();
+                } else {
+                        throw new RuntimeException("Unable to retrieve current user's API key");
+                }
+        }
+
+        // Helper method to create EntityModel for temperature with necessary links
+        private EntityModel<Temperature> buildTemperatureEntityModel(Temperature temperature) {
+                // Create a link to the temperature's details
+                Link selfLink = linkTo(methodOn(TemperatureController.class).one(temperature.getId())).withSelfRel();
+
+                // Create a link to the device associated with this temperature
+                Link deviceLink = linkTo(methodOn(DeviceController.class).one(temperature.getDevice().getId()))
+                                .withRel("device");
+
+                // Create an EntityModel for the temperature including links
+                return EntityModel.of(temperature, selfLink, deviceLink);
+        }
+
+        // Helper method to add temperature to list if it matches the current user's API
+        // key
+        private void addTemperatureToListIfMatchingApiKey(Temperature temperature, String currentUserApiKey,
+                        List<EntityModel<Temperature>> temperatures) {
+                if (temperature.getDevice().getApiKey().equals(currentUserApiKey)) {
+                        temperatures.add(buildTemperatureEntityModel(temperature));
+                }
+        }
 }

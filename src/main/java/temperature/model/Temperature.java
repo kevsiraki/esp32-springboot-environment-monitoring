@@ -9,8 +9,15 @@ import javax.persistence.ManyToOne;
 import javax.persistence.Column;
 
 import java.util.UUID;
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import com.fasterxml.jackson.annotation.JsonTypeName;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonInclude.Include;
 
 @Entity
+@JsonInclude(Include.NON_NULL)
 public class Temperature {
     @Id
     @GeneratedValue(generator = "uuid2")
@@ -100,4 +107,30 @@ public class Temperature {
     public void setDevice(Device device) {
         this.device = device;
     }
+
+    @Override
+    public String toString() {
+        return "Temperature{" +
+                "id='" + id + '\'' +
+                ", temperatureC=" + temperatureC +
+                ", humidityPercent=" + humidityPercent +
+                ", dewPoint=" + dewPoint +
+                ", timestamp=" + timestamp +
+                ", device=" + deviceToString() +
+                '}';
+    }
+
+    private String deviceToString() {
+        if (device != null) {
+            return "Device{" +
+                    "id='" + device.getId() + '\'' +
+                    ", deviceName='" + device.getDeviceName() + '\'' +
+                    ", location='" + device.getLocation() + '\'' +
+                    ", apiKey='" + device.getApiKey() + '\'' +
+                    '}';
+        } else {
+            return "null";
+        }
+    }
+
 }
